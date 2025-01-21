@@ -230,3 +230,105 @@ where 장비번호='C'
 order by 변경일자||변경순번;
 
 인덱스에서는 변경일자와 변경순번을 가공하지 않은 상태로 정렬이 되어있는데 sql내에서 가공을 하여 정렬연산을 요구했기에 정렬연산을 수행하게된다.
+
+
+다음 예시는 ORDER BY 연산이 일어난 연산이다.
+SELECT * --1
+FROM--2
+(
+	SELECT TO_CHAR(A.주문번호, 'FM000000')AS '주문번호',A.업체번호,A.주문금액--3
+	FROM 주문 A--4
+	WHERE A.주문일자=:dt--5
+	AND A.주문번호 < NVL(:next_ord_no,0)--6
+	ORDER BY 주문번호--7
+)
+WHERE ROWNUM<=30;--8
+
+해당 SQL이 ORDER BY 연산이 일어나는 이유는 7번째 줄때문이다. 주문번호는 테이블 A의 가공되지않은 컬럼을 나타내는지 아니면 TO_CHAR(A.주문번호, 'FM000000')AS '주문번호' 로 가공한 컬럼을 가르키는지 생각해보면 답은 알 수 있다.
+7번째 줄의 주문번호는 TO_CHAR로 가공된 컬럼을 가르키고 있는 ORDER BY이다. 그래서 해당 줄의 주문번호를 A.주문번호로 수정을 하면 정상적으로 ORDER BY 연산을 수행하지 않고 정렬된 결과를 볼 수 있을 것이다. 
+
+
+### 6. SELECT -LIST에서 컬럼 가공
+아래 SQL은 옵티마이저가 따로 정렬연산을 하지않는 SQL이다.
+MIN)
+SELECT MIN(변경순번)
+FROM 상태변경이력
+WHERE 장비번호='C'
+AND 변경일자 = '20180316'
+
+MAX)
+SELECT MAX(변경순번)
+FROM 상태변경이력
+WHERE 장비번호='C'
+AND 변경일자 = '20180316'
+
+MIN의 경우 수직탐색을 할 때 왼쪽지점으로 내려가서 찾는 첫번째 레코드가 MIN값이 된다. 
+MAX의 경우 수직탐색을 할 때 오른쪽지점으로 내려가서 찾는 첫번째 레코드가 MAX값이 된다.
+두개의 SQL모두 정렬연산을 사용하지 않고 최댓값과 최솟값을 찾을 수 있다. 두개의 SQL의 실행계획을 보면
+**FIRST ROW**라는 단어와 INDEX RANGE SCAN(**MAX / MIN**)을 볼 수 있다. 
+다만 아래와 같이 컬럼을 가공을 할 경우는 해당하지 않는다. 
+SELECT NVL(MAX(TO_NUMBER(변경순번)),0)
+~이하생략
+이 SQL에서는 변경순번을 숫자값을 기준으로 바꾼 후 MAX를 요구하였으나 인덱스는 문자를 기준으로 하였기에 정렬연산을 사용하게된다. 만약 정렬연산없이 찾고싶을 경우에는 이렇게하면된다.
+SELECT NVL(TO_NUMBER(MAX(변경순번)),0)
+~이해생략
+
+다음예제
+SELECT 장비번호, 장비명 상태코드,
+&nbsp;(
+&nbsp;&nbsp;SELECT MAX(변경일자)
+&nbsp;&nbsp;FROM 상태변경이력
+&nbsp;&nbsp;WHERE 장비번호  = P.장비번호
+&nbsp;)AS 최종변경일자
+FROM 장비 P
+WHERE 장비구분코드 ='A001'
+
+해당 SQL에서 실행계획을보면 FRIST ROW와 MIN MAX는 보이고있다. 만약여기에 최종변경순번까지 보고싶다면 어떤식으로 SQL을 짤 수 있을까
+
+SELECT 장비번호, 장비명 상태코드,
+&nbsp;(
+&nbsp;&nbsp;SELECT MAX(변경일자)
+&nbsp;&nbsp;FROM 상태변경이력
+&nbsp;&nbsp;WHERE 장비번호  = P.장비번호
+&nbsp;)AS 최종변경일자,
+&nbsp;(
+&nbsp;&nbsp;SELECT MAX(변경순번)
+&nbsp;&nbsp;FROM 상태변경이력
+&nbsp;&nbsp;WHERE 장비번호  = P.장비번호
+&nbsp;&nbsp;AND 변경일자 =	
+&nbsp;&nbsp;&nbsp;(
+&nbsp;&nbsp;&nbsp;&nbsp;SELECT MAX(변경일자) FROM 상태변경이력
+&nbsp;&nbsp;&nbsp;&nbsp;WHERE 장비번호 = P.장비번호
+&nbsp;&nbsp;&nbsp;)
+&nbsp;)AS 최종변경일자,
+FROM 장비 P
+WHERE 장비구분코드 ='A001'
+
+SQL자체도 복잡한데 우선 성능도 안좋은 SQL이다. 상태변경이력 테이블을 많이 읽는 SQL이다. 그러면 SQL자체를 조금 간단하게 나타내보면 아래와 같이 나타낼 수 있다.
+
+SELECT 장비번호, 장비명, 상태코드
+&nbsp;,SUBSTR(최종이력,1,8) AS 최종변경일자
+&nbsp;,SUBSTR(최종이력,9) AS 최종변경순번
+FROM(
+&nbsp;SELECT 장비번호, 장비명, 상태코드
+&nbsp;&nbsp;,(SELECT MAX(변경일자||변경순번)
+&nbsp;FROM 상태변경이력
+&nbsp;WHERE 장비번호 = P.장비번호)최종이력
+&nbsp;FROM 장비 P
+&nbsp;WHERE 장비구분코드 = 'A001'
+)
+우선 간단하게 원래 SQL보다는 간단해지기는 했다. 하지만 성능으로써는 장비당 이력이 많지않은 경우에는 크게 상관없지만, 이력이 많다면 문제가 생길 수 있는 SQL이다. 각 장비에 속한 과거 데이터를 모두 읽어야 하므로 이력이 많을 경우 성능이 그전 SQL보다 안 좋을 수도있다.
+이런 SQL은 Top N 알고리즘을 알아야 하므로 5장 3절 4항에서 설명한다.
+
+### 7. 자동 형변환
+SELECT * FROM 고객 WHERE 생년월일 = 19821225
+해당 SQL은 우리가 앞에서 계속 설명했던 선두컬럼이 가공되지않아야 INDEX가 정상적으로 탄다.의 좋은 예시인 거처럼 보인다. 하지만 실제로 옵티마이저는 해당 SQL을 FULL SCAN을 한다.
+그리고 실행계획 아래쪽에 조건절 정보를 보면
+1 - filter(TO_NUMBER("생년월일"))=19821225)라고 적힌것을 볼 수있다. 해당 sql은 옵티마이저가 아래와 같이 변환했다는 뜻이다.
+SELECT * FROM 고객 WHERE TO_NUMBER(생년월일) = 19821225
+위와 같은 SQL을 보면 왜 인덱스가 안 탔는지 알 수있다. 가공이 되었기에 인덱스가 타지않은 것이다.
+그러면 왜 형변환을 한것일까? 우선 생년월일은 문자컬럼이다. 하지만 우리가 조건에 넣은 값은 숫자이다. 값이 다르기에 DBMS가 자동으로 형변환을 한 것이다. (DBMS마다 어떻게 처리하는지는 다르다.)
+
+날짜 포맷 또한 자동변환이 일어난다. 그래서 날짜포맷을 쓸 경우는 아래와 같이 지정해주는 습관을 가지자.
+SELECT * FROM 고객
+WHERE 가입일자 = TO_DATE('01-JAN-2018','DD-MON-YYYY')
