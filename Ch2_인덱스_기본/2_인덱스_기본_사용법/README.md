@@ -332,3 +332,55 @@ SELECT * FROM 고객 WHERE TO_NUMBER(생년월일) = 19821225
 날짜 포맷 또한 자동변환이 일어난다. 그래서 날짜포맷을 쓸 경우는 아래와 같이 지정해주는 습관을 가지자.
 SELECT * FROM 고객
 WHERE 가입일자 = TO_DATE('01-JAN-2018','DD-MON-YYYY')
+심지어 NLS_DATE_FORMAT 파라미터가 다르게 설정된 환경에선 잘못된 결과 또는 오휴가 날 수도 있으니 꼭 습관화하자.
+
+앞서 숫자와 문자의 경우 우선순위가 숫자가 높지만, LIKE의 경우는 다르다. LIKE의 경우 문자열 비교 연산자이다. 그러다보니 숫자가 문자로 변환이 된다. 실행계획을 보면 조건절에 FILTER로 TO_CHAR가 쓰여진 것을 볼 수있다.
+
+**자동 형변환의 주의할점!(기능적)**
+3장 3절을 보고나야 이것이 이해될 것이다. LIKE조건을 옵션 조건처리 할 때가 있다. 
+아래 SQL 두개의 예시를 보면
+1. 사용자가 계좌번호를 입력했을 때
+SELECT * FROM 거래
+WHERE 계좌번호 = :ACNT_NO
+AND 거래일자 BETWEEN :TRD_DT1 AND :TRD_DT2
+
+2. 사용자가 계좌번호를 입력하지 않았을 때
+SELECT * FROM 거래
+WHERE 거래일자 BETWEEN :TRD_DT1 AND :TRD_DT2
+
+다만 많은 개발자가 아래와 같은 방법을 쓴다.
+SELECT * FROM 거래
+WHERE 계좌번호 = :ACNT_NO || '%'
+AND 거래일자 BETWEEN :TRD_DT1 AND :TRD_DT2
+(실제 이 내용을 정리하는 본인도 회사를 다니던 시절 이렇게 사용했다. )
+
+이 방식에서는 LIKE 와 BETWEEN을 같이 사용해서 인덱스 효율이 좋지못하다. 그리고 계좌번호 컬럼이 숫자형일 때 주의가 필요하다. 
+
+**품질적인 측면에서의 자동 형변환 주의!!**
+아래와 같은 예시를 보면 쉽게 알 수 있다.
+WHERE N_COL = V_COL
+
+에러가 날 가능성이 있는 코드이다. 앞서 말했든시 문자와 숫자를 조건에 넣으면 문자가 숫자로 바뀐다. 사용자가 '123'을 넣었다면 문제가 없겠지만 '일이삼'을 넣은 순간 에러가 발생할 것이다. 
+
+아래 sql은 에러가 아닌 결과 오류가 나는 SQL이다.
+SELECT ROUND(AVG(SAL)) AVG_SAL
+&nbsp;,MIN(SAL) MIN_SAL
+&nbsp;,MAX(SAL) MAX_SAL
+&nbsp;,MAX(DECODE(JOB,'PRESIDENT',NULL,SAL)) MAX_SAL2
+FROM EMP;
+
+RESULT
+AVG_SAL:2073
+MIN_SAL:800
+MAX_SAL:5000
+MAX_SAL2:950
+
+MAX_SAL2는 가장 많은 급여를 받을 거 같은 직업을 넣고 그 직업은 제외한 직업 중 가장 높은 급여를 조회를 하는 SQL이다. 하지만 결과 MAX_SAL2는 평균 급여보다도 낮다. 거의 최솟값이다. 실제 레코드 단위로 조회해보면 가장 높은 급여를 가진 직업은 'ANALYST'였고, 2개의 3000인 데이터가 있었다.
+
+우선 이러한 값 오류가 일어난 이유는 DECODE(a,b,c,d)에서 a=b이면 c반환 아니면 d반환을 한다.  DECODE에서는 c를 기준으로 d의 데이터타입을 형변환 시킨다. 그리고 c의 값이 null일경우 varchar2로 관리를 한다. 그러면 네번째 인자 sal의 데이터타입은 varchar2로 가져올거고, 그 값중 가장 큰 값은 "950"이 되는거다.("950">"3000" , 950<3000)
+
+아래와 같이 쓰면 피할 수 있다.
+&nbsp;,MAX(DECODE(JOB,'PRESIDENT',0,SAL)) MAX_SAL2
+&nbsp;,MAX(DECODE(JOB,'PRESIDENT',TO_NUMBER(NULL),SAL)) MAX_SAL2
+
+이러한 형변환 함수들을 쓰면 성능에 영향은 별로 없다. 이것보다 블록IO 줄이는게 더 중요하다. 형변환 함수를 생략하면 옵티마이저가 자동으로 형변환 함수를 생성하기에 의도치않는 형변환을 방지하기위해 SQL의도에 맞게 형변환 함수를 써서 옵티마이저에게 넘기자자
